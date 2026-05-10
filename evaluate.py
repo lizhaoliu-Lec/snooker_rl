@@ -1,0 +1,290 @@
+"""
+Snooker RL Inference Script
+Evaluates and visualizes trained PPO agent
+"""
+
+import os
+import sys
+import argparse
+import numpy as np
+import torch
+import pygame
+import matplotlib.pyplot as plt
+from datetime import datetime
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from environment.snooker_env import SnookerEnv
+from algorithms.ppo import PPO
+
+
+class InferenceVisualizer:
+    def __init__(self, agent, env):
+        self.agent = agent
+        self.env = env
+        self.episode_history = []
+        
+    def run_episode(self, render=True, delay_ms=500, record=True):
+        """Run a single episode with the trained agent"""
+        state, _ = self.env.reset()
+        episode_reward = 0
+        episode_length = 0
+        episode_data = {
+            'states': [],
+            'actions': [],
+            'rewards': [],
+            'breaks': [],
+            'pocketed': []
+        }
+        
+        print("\n" + "=" * 60)
+        print("Starting Episode")
+        print("=" * 60)
+        
+        while True:
+            if render:
+                self.env.render()
+                self._handle_events()
+                
+            action, log_prob, value = self.agent.select_action(state)
+            
+            if record:
+                episode_data['states'].append(state.copy())
+                episode_data['actions'].append(action.copy())
+                
+            next_state, reward, done, truncated, info = self.env.step(action)
+            
+            if record:
+                episode_data['rewards'].append(reward)
+                episode_data['breaks'].append(info.get('break', 0))
+                episode_data['pocketed'].append(info.get('pocketed', []))
+                
+            episode_reward += reward
+            episode_length += 1
+            
+            if render:
+                self._draw_action_info(action, info)
+                pygame.time.wait(delay_ms)
+                
+            if done or truncated:
+                break
+                
+            state = next_state
+            
+        if record:
+            self.episode_history.append(episode_data)
+            
+        print("\n" + "-" * 60)
+        print(f"Episode Summary:")
+        print(f"  Total Reward: {episode_reward:.2f}")
+        print(f"  Episode Length: {episode_length} steps")
+        print(f"  Final Break: {info.get('break', 0)}")
+        print(f"  Total Score: {info.get('score', 0)}")
+        print(f"  Foul: {info.get('foul', False)}")
+        print("-" * 60)
+        
+        return episode_reward, episode_length, info
+        
+    def _handle_events(self):
+        """Handle pygame events"""
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return True
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    return True
+                elif event.key == pygame.K_SPACE:
+                    pygame.event.post(pygame.event.Event(pygame.KEYUP))
+        return False
+        
+    def _draw_action_info(self, action, info):
+        """Draw action information on screen"""
+        if self.env.screen is None:
+            return
+            
+        angle, power = action
+        
+        font = pygame.font.Font(None, 24)
+        text_y = 130
+        
+        angle_text = font.render(f"Angle: {np.degrees(angle):.1f}°", True, (255, 255, 255))
+        power_text = font.render(f"Power: {power:.2f}", True, (255, 255, 255))
+        break_text = font.render(f"Current Break: {info.get('break', 0)}", True, (255, 255, 0))
+        
+        self.env.screen.blit(angle_text, (10, text_y))
+        self.env.screen.blit(power_text, (10, text_y + 25))
+        self.env.screen.blit(break_text, (10, text_y + 50))
+        
+        pygame.display.flip()
+        
+    def plot_episode_history(self, save_path=None):
+        """Plot episode history"""
+        if not self.episode_history:
+            print("No episode history to plot")
+            return
+            
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        
+        rewards = [sum(ep['rewards']) for ep in self.episode_history]
+        lengths = [len(ep['rewards']) for ep in self.episode_history]
+        max_breaks = [max(ep['breaks']) if ep['breaks'] else 0 for ep in self.episode_history]
+        
+        episodes = range(1, len(self.episode_history) + 1)
+        
+        axes[0, 0].plot(episodes, rewards, 'b-', linewidth=2)
+        axes[0, 0].set_title('Episode Rewards', fontsize=14)
+        axes[0, 0].set_xlabel('Episode')
+        axes[0, 0].set_ylabel('Total Reward')
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        axes[0, 1].plot(episodes, lengths, 'g-', linewidth=2)
+        axes[0, 1].set_title('Episode Lengths', fontsize=14)
+        axes[0, 1].set_xlabel('Episode')
+        axes[0, 1].set_ylabel('Steps')
+        axes[0, 1].grid(True, alpha=0.3)
+        
+        axes[1, 0].plot(episodes, max_breaks, 'r-', linewidth=2)
+        axes[1, 0].set_title('Max Break per Episode', fontsize=14)
+        axes[1, 0].set_xlabel('Episode')
+        axes[1, 0].set_ylabel('Break Score')
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        all_rewards = []
+        for ep in self.episode_history:
+            all_rewards.extend(ep['rewards'])
+        axes[1, 1].hist(all_rewards, bins=50, alpha=0.7, edgecolor='black')
+        axes[1, 1].set_title('Reward Distribution', fontsize=14)
+        axes[1, 1].set_xlabel('Reward')
+        axes[1, 1].set_ylabel('Frequency')
+        axes[1, 1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path)
+            print(f"Plot saved to {save_path}")
+        plt.close()
+        
+    def generate_report(self, save_path='evaluation_report.txt'):
+        """Generate a text report of evaluation results"""
+        if not self.episode_history:
+            print("No evaluation data available")
+            return
+            
+        total_rewards = [sum(ep['rewards']) for ep in self.episode_history]
+        total_steps = [len(ep['rewards']) for ep in self.episode_history]
+        max_breaks = [max(ep['breaks']) if ep['breaks'] else 0 for ep in self.episode_history]
+        
+        with open(save_path, 'w') as f:
+            f.write("=" * 60 + "\n")
+            f.write("SNOOKER RL EVALUATION REPORT\n")
+            f.write("=" * 60 + "\n\n")
+            
+            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Total Episodes: {len(self.episode_history)}\n\n")
+            
+            f.write("-" * 60 + "\n")
+            f.write("REWARD STATISTICS\n")
+            f.write("-" * 60 + "\n")
+            f.write(f"Mean Reward: {np.mean(total_rewards):.2f}\n")
+            f.write(f"Std Reward: {np.std(total_rewards):.2f}\n")
+            f.write(f"Min Reward: {np.min(total_rewards):.2f}\n")
+            f.write(f"Max Reward: {np.max(total_rewards):.2f}\n\n")
+            
+            f.write("-" * 60 + "\n")
+            f.write("EPISODE LENGTH STATISTICS\n")
+            f.write("-" * 60 + "\n")
+            f.write(f"Mean Length: {np.mean(total_steps):.1f} steps\n")
+            f.write(f"Std Length: {np.std(total_steps):.1f} steps\n")
+            f.write(f"Min Length: {np.min(total_steps)} steps\n")
+            f.write(f"Max Length: {np.max(total_steps)} steps\n\n")
+            
+            f.write("-" * 60 + "\n")
+            f.write("BREAK STATISTICS\n")
+            f.write("-" * 60 + "\n")
+            f.write(f"Mean Max Break: {np.mean(max_breaks):.1f}\n")
+            f.write(f"Max Break: {np.max(max_breaks)}\n")
+            
+        print(f"Report saved to {save_path}")
+
+
+def evaluate(args):
+    print("=" * 60)
+    print("Snooker RL Evaluation")
+    print("=" * 60)
+    
+    env = SnookerEnv(render_mode='human')
+    
+    state_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.shape[0]
+    
+    agent = PPO(state_dim, action_dim)
+    
+    if args.load_model:
+        if agent.load(args.load_model):
+            print(f"Successfully loaded model from {args.load_model}")
+        else:
+            print(f"Could not load model from {args.load_model}")
+            print("Using randomly initialized agent")
+    else:
+        print("No model specified, using randomly initialized agent")
+    
+    visualizer = InferenceVisualizer(agent, env)
+    
+    try:
+        for episode in range(1, args.num_episodes + 1):
+            reward, length, info = visualizer.run_episode(
+                render=True,
+                delay_ms=args.delay,
+                record=True
+            )
+            
+            if (episode) % args.log_interval == 0:
+                print(f"\nProgress: {episode}/{args.num_episodes} episodes completed")
+                
+    except KeyboardInterrupt:
+        print("\nEvaluation interrupted by user")
+        
+    finally:
+        env.close()
+        
+        if args.save_plot:
+            visualizer.plot_episode_history(args.save_plot)
+            
+        if args.save_report:
+            visualizer.generate_report(args.save_report)
+            
+        if visualizer.episode_history:
+            total_rewards = [sum(ep['rewards']) for ep in visualizer.episode_history]
+            print("\n" + "=" * 60)
+            print("EVALUATION COMPLETE")
+            print("=" * 60)
+            print(f"Episodes Run: {len(visualizer.episode_history)}")
+            print(f"Mean Reward: {np.mean(total_rewards):.2f}")
+            print(f"Std Reward: {np.std(total_rewards):.2f}")
+            print("=" * 60)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Evaluate PPO agent for Snooker')
+    
+    parser.add_argument('--load_model', type=str, required=True,
+                       help='Path to trained model')
+    parser.add_argument('--num_episodes', type=int, default=5,
+                       help='Number of evaluation episodes')
+    parser.add_argument('--delay', type=int, default=500,
+                       help='Delay between steps (ms)')
+    parser.add_argument('--log_interval', type=int, default=10,
+                       help='Episodes between progress logs')
+    parser.add_argument('--save_plot', type=str, default=None,
+                       help='Path to save evaluation plot')
+    parser.add_argument('--save_report', type=str, default=None,
+                       help='Path to save evaluation report')
+    
+    args = parser.parse_args()
+    
+    evaluate(args)
+
+
+if __name__ == '__main__':
+    main()
