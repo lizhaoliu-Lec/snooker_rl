@@ -1,5 +1,14 @@
 """
 PPO (Proximal Policy Optimization) Algorithm Implementation for Snooker RL
+
+Action space (7-dim continuous, all in [-1, 1]):
+  [0] place_x      – D-zone cue ball placement x (only used when ball_in_hand)
+  [1] place_y      – D-zone cue ball placement y (only used when ball_in_hand)
+  [2] target_idx   – mapped to discrete target ball index
+  [3] angle_offset – deviation from white→target centre line (±15°)
+  [4] power        – shot speed V0 mapped to [0.5, 6.0] m/s
+  [5] b_spin       – topspin (+) / backspin (-) mapped to [-0.8, +0.8]
+  [6] a_spin       – sidespin left(-) / right(+) mapped to [-0.5, +0.5]
 """
 
 import torch
@@ -14,45 +23,50 @@ from datetime import datetime
 
 class ActorCritic(nn.Module):
     """
-    Actor-Critic Network for PPO
-    - Actor: Outputs action mean and standard deviation
+    Actor-Critic Network for PPO (Self-Play Snooker)
+    - Actor: Outputs N-dim action mean (all in [-1, 1] via Tanh)
     - Critic: Estimates state value
     """
     def __init__(self, state_dim, action_dim, hidden_dim=256):
         super(ActorCritic, self).__init__()
         
-        # Shared feature extractor
+        # Shared feature extractor (deeper for more complex task)
         self.feature_net = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.Tanh()
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.Tanh(),
         )
         
         # Actor (policy) network
         self.actor_mean = nn.Sequential(
-            nn.Linear(hidden_dim // 2, hidden_dim // 2),
+            nn.Linear(hidden_dim, hidden_dim // 2),
             nn.Tanh(),
             nn.Linear(hidden_dim // 2, action_dim),
             nn.Tanh()  # Bound mean to [-1, 1]
         )
-        self.actor_log_std = nn.Parameter(torch.zeros(action_dim))
+        # Per-dimension learnable log_std
+        self.actor_log_std = nn.Parameter(
+            torch.full((action_dim,), -0.5))  # start with moderate exploration
         
-        # Critic (value) network
+        # Critic (value) network – separate head
         self.critic = nn.Sequential(
-            nn.Linear(hidden_dim // 2, hidden_dim // 2),
+            nn.Linear(hidden_dim, hidden_dim // 2),
             nn.Tanh(),
             nn.Linear(hidden_dim // 2, 1)
         )
         
     def forward(self, x):
-        """Forward pass returning both action distribution and value"""
+        """Forward pass returning both action distribution params and value"""
         features = self.feature_net(x)
         
         mean = self.actor_mean(features)
-        std = torch.exp(self.actor_log_std)
+        std = torch.exp(self.actor_log_std.clamp(-3, 0.5))  # keep std in reasonable range
         
         value = self.critic(features)
         
@@ -63,6 +77,8 @@ class ActorCritic(nn.Module):
         mean, std, value = self.forward(x)
         dist = Normal(mean, std)
         action = dist.sample()
+        # Clamp to [-1, 1] for safety
+        action = action.clamp(-1.0, 1.0)
         log_prob = dist.log_prob(action).sum(dim=-1)
         
         return action, log_prob, value
@@ -168,6 +184,9 @@ class PPO:
         self.state_dim = state_dim
         self.action_dim = action_dim
         
+        if cfg is None:
+            cfg = {}
+        
         # Hyperparameters
         self.gamma = cfg.get('gamma', 0.99)
         self.lam = cfg.get('lam', 0.95)
@@ -200,13 +219,22 @@ class PPO:
         }
         
     def select_action(self, state):
-        """Select action given state"""
+        """
+        Select action given state.
+        
+        The environment expects all 7 dims in [-1, 1] and handles
+        mapping internally (D-zone coords, target index, angle offset,
+        power, topspin/backspin, sidespin).
+        """
         state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
         
         with torch.no_grad():
             action, log_prob, value = self.policy.get_action(state)
-            
-        return action.cpu().numpy()[0], log_prob.cpu().numpy()[0], value.cpu().numpy()[0][0]
+        
+        # Action is already in [-1, 1] thanks to Tanh + clamp in get_action()
+        env_action = action.cpu().numpy()[0].astype(np.float32)
+        
+        return env_action, log_prob.cpu().numpy()[0], value.cpu().numpy()[0][0]
     
     def update(self):
         """Update policy using PPO algorithm"""

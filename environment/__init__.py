@@ -1,8 +1,11 @@
 """
 Snooker RL Environment Package
-A physics-based snooker environment for reinforcement learning.
 """
 
-from environment.snooker_env import SnookerEnv
+# Pooltool-based environment (recommended — full spin physics)
+from environment.pooltool_env import SnookerEnv
 
-__all__ = ['SnookerEnv']
+# Legacy pymunk-based environment (no spin support)
+from environment.snooker_env import SnookerEnv as SnookerEnvLegacy
+
+__all__ = ['SnookerEnv', 'SnookerEnvLegacy']

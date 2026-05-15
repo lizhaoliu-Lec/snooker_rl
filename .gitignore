@@ -51,11 +51,16 @@ Thumbs.db
 runs/
 events.out.tfevents.*
 
-# Trained models
-saved_models/*.pt
-saved_models/*.pth
+# Trained models & experiment outputs
+saved_models/
+experiments/
 
 # Data
 *.csv
 *.npy
 *.npz
+
+# Legacy files (replaced by pooltool)
+test_physics.py
+debug_shots.py
+environment/snooker_env.py
